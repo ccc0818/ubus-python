@@ -39,7 +39,7 @@ def _request(id: str, type: bytes, data: dict, timeout=15):
         _request_map[id] = {'event': Event()}
 
     if not _request_map[id]['event'].wait(timeout):
-        logging.warn(f'request {type} timeout !')
+        logging.warn(f'request {data} timeout !')
         with _request_map_lock:
             del _request_map[id]
         return None
@@ -48,7 +48,7 @@ def _request(id: str, type: bytes, data: dict, timeout=15):
     with _request_map_lock:
         del _request_map[id]
 
-    return res
+    return res or None
 
 def _msg_handler_thread():
     global _exit, _sock, _request_map, _request_map_lock, _event_map, _event_map_lock, _objects_map_lock, _objects_map, _disconnect_cb
@@ -69,7 +69,7 @@ def _msg_handler_thread():
             if t == 0xf2:
                 with _objects_map_lock:
                     cb = _objects_map[data['object']][data['func']]
-                res = cb(data['data'])
+                res = cb(data['data']) if callable(cb) else None
                 _send(b'\x02', {
                     '_id': data['_id'],
                     '_cs': data['_cs'],
@@ -90,7 +90,7 @@ def _msg_handler_thread():
                 with _event_map_lock:
                     event = data['event']
                     for cb in _event_map[event]:
-                        cb(data['data'])
+                        callable(cb) and cb(data['data'])
         except Exception as e:
             logging.error(e)
 
@@ -100,7 +100,7 @@ def connect() -> bool:
         try:
             _sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            _sock.connect('/var/tmp/ubus.sock')
+            _sock.connect('/var/tmp/bus.sock')
             Thread(daemon=True, target=_msg_handler_thread).start()
         except Exception:
             _sock.close()
@@ -118,6 +118,14 @@ def disconnect():
         _disconnect_cb and _disconnect_cb()
 
 def send(event: str, data: dict = {}):
+    if not isinstance(event, str) or event == '':
+        logging.error('parameter event must be a non-empty string !')
+        return
+
+    if not isinstance(data, dict):
+        logging.error('parameter data must be a dict !')
+        return
+
     msg = {
         'event': event,
         'data': data
@@ -126,6 +134,15 @@ def send(event: str, data: dict = {}):
 
 def listen(event: str, cb: Callable[[dict], any]) -> bool:
     global _event_map_lock, _event_map
+
+    if not isinstance(event, str) or event == '':
+        logging.error('parameter event must be a non-empty string !')
+        return False
+
+    if not callable(cb):
+        logging.error('parameter cb must be a function !')
+        return False
+
     id = str(uuid4())
     msg = {
         '_id': id,
@@ -145,6 +162,15 @@ def listen(event: str, cb: Callable[[dict], any]) -> bool:
 
 def add(object: str, methods: dict[str, Callable[[dict], Union[dict, None]]]) -> bool:
     global _objects_map, _objects_map_lock
+
+    if not isinstance(object, str) or object == '':
+        logging.error('parameter object must be a non-empty string !')
+        return False
+
+    if not isinstance(methods, dict) or not methods:
+        logging.error('parameter methods must be a non-empty dict !')
+        return False
+
     id = str(uuid4())
     msg = {
         '_id': id,
@@ -160,6 +186,18 @@ def add(object: str, methods: dict[str, Callable[[dict], Union[dict, None]]]) ->
     return bool(res)
 
 def call(object: str, func: str, data: dict = {}) -> Union[None, dict]:
+    if not isinstance(object, str) or object == '':
+        logging.error('parameter object must be a non-empty string !')
+        return
+
+    if not isinstance(func, str) or func == '':
+        logging.error('parameter func must be a non-empty string !')
+        return
+
+    if not isinstance(data, dict):
+        logging.error('parameter data must be a dict !')
+        return
+
     id = str(uuid4())
     msg = {
         '_id': id,
@@ -172,4 +210,76 @@ def call(object: str, func: str, data: dict = {}) -> Union[None, dict]:
 
 def on_disconnect(cb: Callable[[any], any]):
     global _disconnect_cb
+
+    if not callable(cb):
+        logging.error('parameter cb must be a function !')
+        return
     _disconnect_cb = cb
+
+
+if __name__ == "__main__":
+    from sys import argv, exit
+    import time
+    import atexit
+
+    def usage():
+        print('usage: python bus.py [option]')
+        print('option:')
+        print('    call [object] [func] <args>: invoke the func of object')
+        print("    listen [event]: listen the event")
+        print("    send [event] <args>: send event")
+
+    if len(argv) <= 1 or argv[1] == '-h' or argv[1] == '--help':
+        usage()
+        exit()
+
+    if not connect():
+        print('connect failed!')
+        disconnect()
+        exit()
+
+    atexit.register(lambda: disconnect())
+
+    if argv[1] == 'call':
+        if (len(argv) - 1) < 3:
+            print("invalid parameter")
+            exit()
+
+        object = argv[2]
+        func = argv[3]
+        if len(argv) >= 5:
+            try:
+                args = json.loads(argv[4])
+            except Exception as e:
+                print(e)
+                exit()
+        else:
+            args = {}
+        res = call(object, func, args)
+        print(res)
+    elif argv[1] == 'listen':
+        if (len(argv) - 1) < 2:
+            print("invalid parameter")
+            exit()
+        if not listen(argv[2], lambda v: print(v)):
+            print(f'listen {argv[2]} failed!')
+            exit()
+        while True:
+            time.sleep(3)
+    elif argv[1] == 'send':
+        if (len(argv) - 1) < 2:
+            print("invalid parameter")
+            exit()
+
+        event = argv[2]
+        if len(argv) >= 4:
+            try:
+                args = json.loads(argv[3])
+            except Exception as e:
+                print(e)
+                exit()
+        else:
+            args = {}
+        send(event, args)
+    else:
+        usage()

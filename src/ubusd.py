@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
-
 def init_logging():
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(lineno)d - %(message)s')
     logging.getLogger().setLevel(logging.DEBUG)
@@ -55,7 +54,7 @@ class Client:
         data_len = i2b(len(data) + 1)
         self._send(data_len + b'\xf0' + data)
 
-    def call(self, cs: socket.socket, call_id: str, object: str, func: str, data: dict):
+    def call(self, cs: socket.socket, call_id: str, object: str, func: str, data: dict) -> bool:
         with self._objects_lock:
             if object in self._objects and func in self._objects[object]:
                 msg = {}
@@ -67,8 +66,9 @@ class Client:
                 msg = json.dumps(msg).encode()
                 data_len = i2b(len(msg) + 1)
                 self._send(data_len + b'\xf2' + msg)
+                return True
             else:
-                self.send_call_reply({'_id': call_id, 'ret': 0})
+                return False
 
     def send_call_reply(self, data: dict):
         data = json.dumps(data).encode()
@@ -94,7 +94,7 @@ class Client:
                 self._send(data_len + b'\xf4' + msg)
 
 class Server(Thread):
-    sock_path = Path("/var/tmp/ubus.sock")
+    sock_path = Path("/var/tmp/bus.sock")
     backlog = 32
 
     def __init__(self):
@@ -162,7 +162,8 @@ class Server(Thread):
         with self._clients_lock:
             for client in self._clients.values():
                 if client.object_exist(data['object']):
-                    client.call(cs, data['_id'], data['object'], data['func'], data['data'])
+                    if not client.call(cs, data['_id'], data['object'], data['func'], data['data']):
+                        self._clients[cs].send_call_reply({"_id": data['_id'], 'ret': 0})
                     return
             self._clients[cs].send_call_reply({"_id": data['_id'], 'ret': 0})
 
@@ -211,10 +212,10 @@ if __name__ == "__main__":
 
     server = Server()
     server.start()
-    logging.critical('ubusd start run .')
+    logging.critical('busd start run .')
 
     while True:
         time.sleep(3)
 
         if not server.is_alive():
-            break
+            exit()
